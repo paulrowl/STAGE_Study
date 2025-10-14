@@ -18,54 +18,60 @@ This is a complete analysis pipeline for comparing STAGE MRI sequences to conven
 
 ## Quick Start
 
-### 1. DICOM Folder Organization (reads headers to identify sequences)
+### 1. Organize Raw DICOM Data (copies from raw to organized directory)
+
+**IMPORTANT**: This step copies data from `data/raw/` to `data/organized/` while identifying sequences. Your raw data remains untouched.
 
 ```bash
 cd ~/Projects/STAGE_Study
 
 # Dry run first (safe - shows what will happen)
-python scripts/dicom_folder_renamer.py data/raw --dry-run
+python scripts/organize_raw_data.py --dry-run
 
 # Review the output, then run live
-python scripts/dicom_folder_renamer.py data/raw --live
+python scripts/organize_raw_data.py --live
 ```
 
 This will:
-- Read DICOM headers (SeriesDescription field)
-- Identify sequences: T1 MPRAGE, STAGE-T1W, T2 AX, T2w_STAGE, SWI AX, SWI_STAGE
-- Rename folders to: T1_conv, T1_STAGE, T2_conv, T2_STAGE, SWI_conv, SWI_STAGE
-- Validate file counts against expected values
+- Scan all patient folders in `data/raw/`
+- Read DICOM headers to identify sequences
+- Copy and organize into `data/organized/PatientID/SequenceName/`
+- Create 6 standardized folders per subject: T1_conv, T1_STAGE, T2_conv, T2_STAGE, SWI_conv, SWI_STAGE
+- Filter for axial-only orientations
+- Leave original `data/raw/` completely untouched
 
-### 2. Alternative: Metadata-based Classification
-
-```bash
-python scripts/dicom_sequence_classifier.py data/raw --live
-```
-
-This will:
-- Scan all DICOM files in `data/raw/`
-- Classify sequences based on DICOM metadata (PixelBandwidth, FlipAngle, TE, TR)
-- Organize into `data/raw/organized/` with 6 standardized folders per subject
-- Exclude non-axial orientations, PD_STAGE, and phase data
-
-### 3. Visually verify classification
+### 2. Visually verify classification
 
 **Option A: Overview viewer** (all 6 sequences side-by-side)
 ```bash
-python scripts/dicom_viewer.py data/raw/organized
+python scripts/dicom_viewer.py data/organized
 ```
 
 **Option B: Detailed slice viewer** (interactive navigation)
 ```bash
-python scripts/dicom_slice_viewer.py data/raw/organized
+python scripts/dicom_slice_viewer.py data/organized
 ```
 
 Use arrow keys (←/→) to navigate slices, (↑/↓) to switch sequences.
 
-### 4. Check organized output
+### 3. Check organized output
 ```bash
-ls -lh data/raw/organized/Anon*/
+ls -lh data/organized/*/
 ```
+
+### 4. Run the complete analysis pipeline
+
+```bash
+# Edit config.yaml to specify which patients to process
+python scripts/master_pipeline.py --config config.yaml
+```
+
+This will run the complete pipeline:
+- Step 1: Convert DICOM to NIfTI
+- Step 2: Brain extraction (HD-BET)
+- Step 3: Co-registration (ANTs)
+- Step 4: Tissue segmentation (skipped - not required for basic metrics)
+- Step 5: Calculate comprehensive metrics (SSIM, NCC, Pearson r, SNR, CNR, etc.)
 
 ---
 
@@ -88,22 +94,25 @@ The complete pipeline includes:
 
 ## Expected Directory Structure
 
-### Before (raw):
+### Raw data (untouched):
 ```
 data/raw/
 ├── Anon42647/
 │   ├── 1000ACFF/
-│   │   ├── 1000B604/  (DICOM files)
-│   │   ├── 1000B69F/  (DICOM files)
-│   │   └── ...
-│   └── DICOMDIR
-└── Anon60837/
-    └── (similar structure)
+│   │   └── 1000AD00/
+│   │       ├── 1000AD01/  (DICOM sequence folder)
+│   │       ├── 1000AD72/  (DICOM sequence folder)
+│   │       └── ...
+│   ├── DICOMDIR
+│   └── (CD viewer files)
+├── Anon60837/
+│   └── (similar structure)
+└── (other patient folders)
 ```
 
-### After (organized):
+### Organized data (copied and structured):
 ```
-data/raw/organized/
+data/organized/
 ├── Anon42647/
 │   ├── T1_conv/      (170 files - T1 MPRAGE axial)
 │   ├── T2_conv/      (210 files - T2 SPACE + FLAIR axial)
@@ -118,6 +127,16 @@ data/raw/organized/
     ├── T1_STAGE/     (112 files)
     └── SWI_STAGE/    (432 files)
     # Note: No T2_STAGE for this subject
+```
+
+### Output data (analysis results):
+```
+output/
+├── nifti/           (converted NIfTI files)
+├── brain_masks/     (brain extraction masks)
+├── registered/      (co-registered images)
+├── metrics/         (quantitative metrics CSV files)
+└── statistics/      (statistical analysis results)
 ```
 
 ## Classification Criteria
@@ -171,8 +190,12 @@ The classifier uses DICOM metadata to identify sequences:
 ## Scripts
 
 ### DICOM Organization
-- **`dicom_folder_renamer.py`**: Reads DICOM headers and renames folders based on SeriesDescription
-- **`dicom_sequence_classifier.py`**: Classifies sequences based on DICOM metadata (PixelBandwidth, FlipAngle, etc.)
+- **`organize_raw_data.py`**: Main script - copies and organizes raw DICOM data into standardized structure (leaves raw data untouched)
+- **`dicom_folder_renamer.py`**: Legacy - renames folders in-place based on SeriesDescription (use organize_raw_data.py instead)
+- **`dicom_sequence_classifier.py`**: Legacy - classifies sequences based on metadata (functionality now in organize_raw_data.py)
+
+### Analysis Pipeline
+- **`master_pipeline.py`**: Complete analysis pipeline from DICOM to metrics (Steps 1-5)
 
 ### Visualization and QC
 - **`dicom_viewer.py`**: Overview viewer showing all 6 sequences side-by-side

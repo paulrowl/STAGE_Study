@@ -1,5 +1,5 @@
-base_dir: ~/Projects/STAGE_Study/data/raw/organized
+base_dir: ~/Projects/STAGE_Study/data/organized
 output_dir: ~/Projects/STAGE_Study/output
 device: cpu
 num_parallel: 2
-patients: ['Anon42647']  # Test with one patient first
+patients: []  # Empty = process all patients, or list specific like ['Anon42647']
