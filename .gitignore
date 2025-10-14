@@ -1,7 +1,10 @@
 # Data files
 data/
+output/
 *.dcm
 *.dicom
+*.nii.gz
+*.nii
 
 # Python
 __pycache__/
