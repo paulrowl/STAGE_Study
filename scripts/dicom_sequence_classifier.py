@@ -76,15 +76,21 @@ class DICOMSequenceClassifier:
             },
             'SWI_conv': {
                 'series_desc_patterns': ['SWI AX_SWI', 'SWI AX', 'SWI'],
-                'pixel_bandwidth_range': (100, 200),
+                'pixel_bandwidth_range': (100, 140),  # Actual: 120
                 'pixel_representation': 0,
-                'expected_slices': (80, 100)
+                'expected_slices': (70, 100),  # Min=72 (patient 70749), Max=96
+                'sequence_name': '*swi3d1r',  # Specific to conventional SWI
+                'echo_time_range': (18, 22),  # Actual: 20 ms
+                'flip_angle_range': (13, 17)  # Actual: 15°
             },
             'SWI_STAGE': {
                 'series_desc_patterns': ['SWI_STAGE', 'STAGE SWI', 'SWI_Ax_STAGE'],
-                'pixel_bandwidth_range': (200, 350),
-                'pixel_representation': 1,  # Derived images often use signed pixels
-                'expected_slices': (1, 120)  # May be small derived products
+                'pixel_bandwidth_range': (280, 320),  # Actual: 303
+                'pixel_representation': [0, 1],  # Can be primary or derived
+                'expected_slices': (80, 120),  # Min=90, Max=112 (exclude incomplete <80)
+                'sequence_name': '*fl3d3',  # STAGE uses fl3d3 sequence
+                'echo_time_range': (20, 25),  # Actual: 22.5 ms
+                'flip_angle_range': (10, 14)  # Actual: 12°
             }
         }
         
@@ -350,7 +356,31 @@ class DICOMSequenceClassifier:
             elif slice_min * 0.8 <= num_slices <= slice_max * 1.2:
                 score += 10.0
                 criteria.append(f"Slice count close ({num_slices})")
-            
+
+            # Check SequenceName if specified (15 points)
+            if 'sequence_name' in signature:
+                expected_seq_name = signature['sequence_name']
+                actual_seq_name = properties.get('sequence_name', '')
+                if expected_seq_name.lower() in actual_seq_name.lower():
+                    score += 15.0
+                    criteria.append(f"SequenceName matches ({actual_seq_name})")
+
+            # Check EchoTime range if specified (10 points)
+            if 'echo_time_range' in signature:
+                te_min, te_max = signature['echo_time_range']
+                actual_te = properties.get('echo_time', 0)
+                if actual_te > 0 and te_min <= actual_te <= te_max:
+                    score += 10.0
+                    criteria.append(f"TE in range ({actual_te:.1f} ms)")
+
+            # Check FlipAngle range if specified (10 points)
+            if 'flip_angle_range' in signature:
+                fa_min, fa_max = signature['flip_angle_range']
+                actual_fa = properties.get('flip_angle', 0)
+                if actual_fa > 0 and fa_min <= actual_fa <= fa_max:
+                    score += 10.0
+                    criteria.append(f"FA in range ({actual_fa:.1f}°)")
+
             if score > best_score:
                 best_score = score
                 best_match = seq_type

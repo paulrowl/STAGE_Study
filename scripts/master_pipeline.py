@@ -342,6 +342,71 @@ class PipelineRunner:
             self.logger.debug(traceback.format_exc())
             return None
 
+    def identify_ventricles(self, brain_data, brain_mask):
+        """
+        Identify ventricles in brain MRI using intensity-based approach.
+        Ventricles appear as bright regions in T2-weighted images and
+        dark-to-moderate in T1-weighted images, typically in central location.
+
+        Args:
+            brain_data: 3D numpy array of brain image
+            brain_mask: 3D numpy array boolean mask of brain
+
+        Returns:
+            ventricle_mask: 3D numpy array boolean mask of ventricles
+        """
+        import numpy as np
+        from scipy import ndimage
+
+        # Get brain intensities
+        brain_values = brain_data[brain_mask]
+
+        if len(brain_values) == 0:
+            return np.zeros_like(brain_mask, dtype=bool)
+
+        # Ventricles are typically in the upper intensity range for T2
+        # and mid-range for T1. We'll use a percentile-based approach.
+        # Use 75th-95th percentile as potential ventricle intensities
+        lower_threshold = np.percentile(brain_values, 75)
+        upper_threshold = np.percentile(brain_values, 95)
+
+        # Create initial mask based on intensity
+        potential_ventricles = (brain_data >= lower_threshold) & (brain_data <= upper_threshold) & brain_mask
+
+        # Anatomical constraint: ventricles are in central region
+        # Get image center
+        center_z, center_y, center_x = np.array(brain_data.shape) // 2
+
+        # Create central region mask (middle 60% of volume)
+        z_range = int(brain_data.shape[0] * 0.3)
+        y_range = int(brain_data.shape[1] * 0.3)
+        x_range = int(brain_data.shape[2] * 0.3)
+
+        central_mask = np.zeros_like(brain_mask, dtype=bool)
+        central_mask[
+            max(0, center_z-z_range):min(brain_data.shape[0], center_z+z_range),
+            max(0, center_y-y_range):min(brain_data.shape[1], center_y+y_range),
+            max(0, center_x-x_range):min(brain_data.shape[2], center_x+x_range)
+        ] = True
+
+        # Combine intensity and anatomical constraints
+        ventricle_mask = potential_ventricles & central_mask
+
+        # Morphological operations to clean up the mask
+        # Remove small isolated regions
+        ventricle_mask = ndimage.binary_erosion(ventricle_mask, iterations=1)
+        ventricle_mask = ndimage.binary_dilation(ventricle_mask, iterations=1)
+
+        # Keep only connected components above minimum size
+        labeled, num_features = ndimage.label(ventricle_mask)
+        if num_features > 0:
+            sizes = ndimage.sum(ventricle_mask, labeled, range(1, num_features + 1))
+            min_size = 100  # Minimum voxels for ventricle
+            mask_sizes = sizes >= min_size
+            ventricle_mask = mask_sizes[labeled - 1] & (labeled > 0)
+
+        return ventricle_mask
+
     def calculate_metrics(self, conv_img, stage_img, output_dir, comparison_name):
         """Calculate comprehensive metrics between conventional and STAGE images"""
         try:
@@ -364,7 +429,39 @@ class PipelineRunner:
             # Create brain mask (exclude background zeros)
             brain_mask = (conv_data > 0) & (stage_data > 0)
 
-            # Extract brain voxels only
+            # VENTRICLE-BASED INTENSITY NORMALIZATION
+            self.logger.info(f"      Identifying ventricles for intensity normalization...")
+
+            # Identify ventricles in both images
+            conv_ventricle_mask = self.identify_ventricles(conv_data, brain_mask)
+            stage_ventricle_mask = self.identify_ventricles(stage_data, brain_mask)
+
+            # Calculate mean ventricle intensities
+            conv_ventricle_voxels = np.sum(conv_ventricle_mask)
+            stage_ventricle_voxels = np.sum(stage_ventricle_mask)
+
+            if conv_ventricle_voxels > 50 and stage_ventricle_voxels > 50:
+                # Sufficient ventricle voxels found
+                conv_ventricle_mean = np.mean(conv_data[conv_ventricle_mask])
+                stage_ventricle_mean = np.mean(stage_data[stage_ventricle_mask])
+
+                self.logger.info(f"        Conv ventricle: {conv_ventricle_voxels} voxels, mean={conv_ventricle_mean:.2f}")
+                self.logger.info(f"        STAGE ventricle: {stage_ventricle_voxels} voxels, mean={stage_ventricle_mean:.2f}")
+
+                # Normalize images by dividing by ventricle intensity
+                conv_data_normalized = conv_data / conv_ventricle_mean
+                stage_data_normalized = stage_data / stage_ventricle_mean
+
+                # Use normalized data for metrics
+                conv_data = conv_data_normalized
+                stage_data = stage_data_normalized
+
+                self.logger.info(f"      ✓ Ventricle normalization applied")
+            else:
+                self.logger.warning(f"      ⚠ Insufficient ventricle voxels detected (conv={conv_ventricle_voxels}, stage={stage_ventricle_voxels})")
+                self.logger.warning(f"        Proceeding without ventricle normalization")
+
+            # Extract brain voxels only (from potentially normalized data)
             conv_brain = conv_data[brain_mask]
             stage_brain = stage_data[brain_mask]
 
