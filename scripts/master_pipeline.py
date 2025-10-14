@@ -263,6 +263,109 @@ class PipelineRunner:
             self.logger.error(f"      ✗ Error during conversion: {e}")
             return None
 
+    def apply_brain_mask(self, input_nifti, mask_file, output_file):
+        """Apply brain mask to create skull-stripped image"""
+        try:
+            import nibabel as nib
+            import numpy as np
+
+            # Load input image and mask
+            img = nib.load(input_nifti)
+            mask = nib.load(mask_file)
+
+            # Get data
+            img_data = img.get_fdata()
+            mask_data = mask.get_fdata()
+
+            # Apply mask
+            brain_data = img_data * mask_data
+
+            # Create new NIfTI image
+            brain_img = nib.Nifti1Image(brain_data, img.affine, img.header)
+
+            # Save
+            nib.save(brain_img, output_file)
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"      ✗ Error applying mask: {e}")
+            return False
+
+    def extract_brain_hdbet(self, input_nifti, output_dir, output_name):
+        """Extract brain using HD-BET"""
+        try:
+            # Create output directory
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Output files (without extension - HD-BET adds it)
+            brain_output_base = output_dir / f"{output_name}_brain"
+            brain_output = output_dir / f"{output_name}_brain.nii.gz"
+            mask_output = output_dir / f"{output_name}_mask.nii.gz"
+
+            # Get device from config
+            device = self.config.get('device', 'cpu')
+
+            self.logger.info(f"      Running: HD-BET on {input_nifti.name} (device: {device})")
+
+            # Run HD-BET via Python module
+            # Import here to avoid issues if not installed
+            from HD_BET.run import run_hd_bet
+
+            run_hd_bet(
+                mri_fnames=str(input_nifti),
+                output_fnames=str(brain_output_base),
+                mode='fast',  # 'fast' or 'accurate'
+                device=device,  # 'cpu' or GPU device number (0, 1, etc.)
+                postprocess=False,
+                do_tta=False,  # Test time augmentation
+                keep_mask=True,
+                overwrite=True
+            )
+
+            # HD-BET creates mask with truncated name - find it
+            # Pattern: HD-BET shortens long filenames (typically to ~7 chars before _mask)
+            mask_files = list(output_dir.glob('*_mask.nii.gz'))
+            potential_mask = None
+
+            # Sort by modification time (most recent first) to get the one we just created
+            mask_files_sorted = sorted(mask_files, key=lambda x: x.stat().st_mtime, reverse=True)
+
+            for mf in mask_files_sorted:
+                # Check if this mask is from the current run (matches output_name prefix)
+                # HD-BET truncates long names, so check if output_name starts with mask name prefix
+                mask_base = mf.name.replace('_mask.nii.gz', '')  # Remove _mask.nii.gz from filename
+                if output_name.startswith(mask_base):
+                    potential_mask = mf
+                    break
+
+            if potential_mask and potential_mask.exists():
+                # Rename to standardized name
+                if potential_mask != mask_output:
+                    potential_mask.rename(mask_output)
+
+                self.logger.info(f"      ✓ Mask created: {mask_output.name}")
+
+                # Apply mask to create brain-extracted image
+                if self.apply_brain_mask(input_nifti, mask_output, brain_output):
+                    self.logger.info(f"      ✓ Brain extracted: {brain_output.name}")
+                    return brain_output, mask_output
+                else:
+                    return None, mask_output
+            else:
+                self.logger.warning(f"      ⚠ HD-BET completed but no mask found")
+                return None, None
+
+        except ImportError:
+            self.logger.error(f"      ✗ HD-BET not installed (pip install HD-BET)")
+            return None, None
+        except Exception as e:
+            self.logger.error(f"      ✗ Error during brain extraction: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None, None
+
     def process_patient(self, patient_folder):
         """Process a single patient through the pipeline"""
         patient_id = patient_folder.name
@@ -320,7 +423,28 @@ class PipelineRunner:
             if self.dry_run:
                 self.logger.info(f"      Would extract brain from both sequences")
             else:
-                self.logger.info(f"      [NOT IMPLEMENTED] Need HD-BET")
+                # Create patient output directory
+                patient_brain_dir = self.output_dirs['brain_masks'] / patient_id
+
+                # Extract brain from conventional sequence
+                conv_brain, conv_mask = self.extract_brain_hdbet(
+                    input_nifti=conv_nifti,
+                    output_dir=patient_brain_dir,
+                    output_name=conv_seq
+                )
+
+                # Extract brain from STAGE sequence
+                stage_brain, stage_mask = self.extract_brain_hdbet(
+                    input_nifti=stage_nifti,
+                    output_dir=patient_brain_dir,
+                    output_name=stage_seq
+                )
+
+                if conv_brain and stage_brain:
+                    self.logger.info(f"      ✓ Both brains extracted successfully")
+                else:
+                    self.logger.warning(f"      ⚠ One or both extractions failed")
+                    continue
 
             # Step 3: Registration
             self.logger.info(f"    Step 3: Co-registration (ANTs)")
