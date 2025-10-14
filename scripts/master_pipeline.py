@@ -292,6 +292,198 @@ class PipelineRunner:
             self.logger.error(f"      ✗ Error applying mask: {e}")
             return False
 
+    def register_images_ants(self, fixed_img, moving_img, output_dir, output_name):
+        """Register moving image to fixed image using ANTs (rigid transformation)"""
+        try:
+            import ants
+
+            # Create output directory
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Output files
+            registered_output = output_dir / f"{output_name}_registered.nii.gz"
+            transform_prefix = output_dir / f"{output_name}_transform_"
+
+            self.logger.info(f"      Running: ANTs registration")
+            self.logger.info(f"        Fixed: {fixed_img.name}")
+            self.logger.info(f"        Moving: {moving_img.name}")
+
+            # Load images with ANTsPy
+            fixed = ants.image_read(str(fixed_img))
+            moving = ants.image_read(str(moving_img))
+
+            # Perform rigid registration
+            # type_of_transform: 'Rigid' for within-patient registration
+            # metric: 'MI' (Mutual Information) works well for multi-modal registration
+            registration = ants.registration(
+                fixed=fixed,
+                moving=moving,
+                type_of_transform='Rigid',
+                metric='MI',
+                verbose=False
+            )
+
+            # Save registered image
+            ants.image_write(registration['warpedmovout'], str(registered_output))
+            self.logger.info(f"      ✓ Registered image: {registered_output.name}")
+
+            # Save transformation matrix
+            # ANTs saves transforms automatically with specific names
+            # We'll just return the registered image
+            return registered_output
+
+        except ImportError:
+            self.logger.error(f"      ✗ ANTsPy not installed (pip install antspyx)")
+            return None
+        except Exception as e:
+            self.logger.error(f"      ✗ Error during registration: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
+
+    def calculate_metrics(self, conv_img, stage_img, output_dir, comparison_name):
+        """Calculate comprehensive metrics between conventional and STAGE images"""
+        try:
+            import nibabel as nib
+            import numpy as np
+            from scipy import stats
+            from skimage.metrics import structural_similarity as ssim
+            import pandas as pd
+
+            # Create output directory
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            self.logger.info(f"      Calculating metrics...")
+
+            # Load images
+            conv_data = nib.load(conv_img).get_fdata()
+            stage_data = nib.load(stage_img).get_fdata()
+
+            # Create brain mask (exclude background zeros)
+            brain_mask = (conv_data > 0) & (stage_data > 0)
+
+            # Extract brain voxels only
+            conv_brain = conv_data[brain_mask]
+            stage_brain = stage_data[brain_mask]
+
+            # Initialize metrics dictionary
+            metrics = {
+                'comparison': comparison_name,
+                'num_voxels': int(np.sum(brain_mask))
+            }
+
+            # 1. Basic statistics
+            metrics['conv_mean'] = float(np.mean(conv_brain))
+            metrics['conv_std'] = float(np.std(conv_brain))
+            metrics['conv_median'] = float(np.median(conv_brain))
+            metrics['stage_mean'] = float(np.mean(stage_brain))
+            metrics['stage_std'] = float(np.std(stage_brain))
+            metrics['stage_median'] = float(np.median(stage_brain))
+
+            # 2. Correlation metrics
+            metrics['pearson_r'], metrics['pearson_p'] = stats.pearsonr(conv_brain, stage_brain)
+            metrics['spearman_r'], metrics['spearman_p'] = stats.spearmanr(conv_brain, stage_brain)
+
+            # 3. Normalized Cross-Correlation (NCC)
+            conv_norm = (conv_brain - np.mean(conv_brain)) / np.std(conv_brain)
+            stage_norm = (stage_brain - np.mean(stage_brain)) / np.std(stage_brain)
+            metrics['ncc'] = float(np.mean(conv_norm * stage_norm))
+
+            # 4. Mutual Information (MI)
+            # Compute 2D histogram
+            hist_2d, x_edges, y_edges = np.histogram2d(conv_brain, stage_brain, bins=50)
+            pxy = hist_2d / float(np.sum(hist_2d))
+            px = np.sum(pxy, axis=1)
+            py = np.sum(pxy, axis=0)
+
+            # Calculate MI
+            px_py = px[:, None] * py[None, :]
+            nzs = pxy > 0  # Only non-zero entries
+            metrics['mutual_information'] = float(np.sum(pxy[nzs] * np.log(pxy[nzs] / px_py[nzs])))
+
+            # 5. Structural Similarity Index (SSIM)
+            # SSIM requires same range, so normalize
+            conv_norm_img = (conv_data - np.min(conv_data)) / (np.max(conv_data) - np.min(conv_data))
+            stage_norm_img = (stage_data - np.min(stage_data)) / (np.max(stage_data) - np.min(stage_data))
+
+            # Calculate SSIM on 2D slices (middle third of volume)
+            depth = conv_norm_img.shape[2]
+            start_slice = depth // 3
+            end_slice = 2 * depth // 3
+            ssim_values = []
+
+            for z in range(start_slice, end_slice):
+                if np.sum(brain_mask[:, :, z]) > 100:  # Only slices with enough brain
+                    ssim_val = ssim(conv_norm_img[:, :, z], stage_norm_img[:, :, z],
+                                   data_range=1.0)
+                    ssim_values.append(ssim_val)
+
+            metrics['ssim_mean'] = float(np.mean(ssim_values)) if ssim_values else 0.0
+            metrics['ssim_std'] = float(np.std(ssim_values)) if ssim_values else 0.0
+
+            # 6. Mean Absolute Error (MAE) and Root Mean Square Error (RMSE)
+            mae = np.mean(np.abs(conv_brain - stage_brain))
+            rmse = np.sqrt(np.mean((conv_brain - stage_brain) ** 2))
+            metrics['mae'] = float(mae)
+            metrics['rmse'] = float(rmse)
+            metrics['nrmse'] = float(rmse / (np.max(conv_brain) - np.min(conv_brain)))  # Normalized RMSE
+
+            # 7. Peak Signal-to-Noise Ratio (PSNR)
+            max_val = max(np.max(conv_brain), np.max(stage_brain))
+            if rmse > 0:
+                metrics['psnr'] = float(20 * np.log10(max_val / rmse))
+            else:
+                metrics['psnr'] = float('inf')
+
+            # 8. Signal-to-Noise Ratio (SNR)
+            # Estimate noise from background
+            background_mask = (conv_data == 0) | (stage_data == 0)
+            if np.sum(background_mask) > 1000:
+                conv_noise = np.std(conv_data[background_mask])
+                stage_noise = np.std(stage_data[background_mask])
+            else:
+                # Estimate noise from signal
+                conv_noise = np.std(conv_brain) * 0.1
+                stage_noise = np.std(stage_brain) * 0.1
+
+            metrics['conv_snr'] = float(np.mean(conv_brain) / conv_noise) if conv_noise > 0 else 0
+            metrics['stage_snr'] = float(np.mean(stage_brain) / stage_noise) if stage_noise > 0 else 0
+
+            # 9. Contrast-to-Noise Ratio (CNR)
+            # Use upper and lower quartiles as "tissues"
+            conv_upper = np.percentile(conv_brain, 75)
+            conv_lower = np.percentile(conv_brain, 25)
+            stage_upper = np.percentile(stage_brain, 75)
+            stage_lower = np.percentile(stage_brain, 25)
+
+            metrics['conv_cnr'] = float(abs(conv_upper - conv_lower) / conv_noise) if conv_noise > 0 else 0
+            metrics['stage_cnr'] = float(abs(stage_upper - stage_lower) / stage_noise) if stage_noise > 0 else 0
+
+            # 10. Coefficient of Variation (CV)
+            metrics['conv_cv'] = float(metrics['conv_std'] / metrics['conv_mean']) if metrics['conv_mean'] > 0 else 0
+            metrics['stage_cv'] = float(metrics['stage_std'] / metrics['stage_mean']) if metrics['stage_mean'] > 0 else 0
+
+            # Save metrics to CSV
+            metrics_file = output_dir / f"{comparison_name}_metrics.csv"
+            df = pd.DataFrame([metrics])
+            df.to_csv(metrics_file, index=False)
+
+            self.logger.info(f"      ✓ Metrics calculated and saved")
+            self.logger.info(f"        SSIM: {metrics['ssim_mean']:.4f}, NCC: {metrics['ncc']:.4f}, Pearson r: {metrics['pearson_r']:.4f}")
+
+            return metrics
+
+        except ImportError as e:
+            self.logger.error(f"      ✗ Missing Python package: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"      ✗ Error calculating metrics: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
+
     def extract_brain_hdbet(self, input_nifti, output_dir, output_name):
         """Extract brain using HD-BET"""
         try:
@@ -451,21 +643,48 @@ class PipelineRunner:
             if self.dry_run:
                 self.logger.info(f"      Would register {stage_seq} → {conv_seq}")
             else:
-                self.logger.info(f"      [NOT IMPLEMENTED] Need ANTs")
+                # Create patient output directory
+                patient_reg_dir = self.output_dirs['registered'] / patient_id
 
-            # Step 4: Tissue segmentation
-            self.logger.info(f"    Step 4: Tissue segmentation (SynthSeg)")
-            if self.dry_run:
-                self.logger.info(f"      Would segment into GM/WM/CSF")
-            else:
-                self.logger.info(f"      [NOT IMPLEMENTED] Need SynthSeg")
+                # Register STAGE brain to conventional brain
+                stage_registered = self.register_images_ants(
+                    fixed_img=conv_brain,
+                    moving_img=stage_brain,
+                    output_dir=patient_reg_dir,
+                    output_name=f"{stage_seq}_to_{conv_seq}"
+                )
+
+                if stage_registered:
+                    self.logger.info(f"      ✓ Registration successful")
+                else:
+                    self.logger.warning(f"      ⚠ Registration failed")
+                    continue
+
+            # Step 4: Tissue segmentation (SKIPPED for now)
+            # Note: Tissue segmentation (GM/WM/CSF) would be useful for tissue-specific
+            # metrics, but the global metrics below work on brain-extracted images
+            self.logger.info(f"    Step 4: Tissue segmentation (SKIPPED - not required for basic metrics)")
 
             # Step 5: Metrics calculation
             self.logger.info(f"    Step 5: Calculate metrics")
             if self.dry_run:
-                self.logger.info(f"      Would calculate 60+ metrics")
+                self.logger.info(f"      Would calculate comprehensive metrics")
             else:
-                self.logger.info(f"      [NOT IMPLEMENTED] Need implementation")
+                # Create patient output directory
+                patient_metrics_dir = self.output_dirs['metrics'] / patient_id
+
+                # Calculate metrics between conventional and registered STAGE
+                metrics = self.calculate_metrics(
+                    conv_img=conv_brain,
+                    stage_img=stage_registered,
+                    output_dir=patient_metrics_dir,
+                    comparison_name=f"{patient_id}_{conv_seq}_vs_{stage_seq}"
+                )
+
+                if metrics:
+                    self.logger.info(f"      ✓ Metrics calculation complete")
+                else:
+                    self.logger.warning(f"      ⚠ Metrics calculation failed")
 
         self.logger.info(f"\n  Patient {patient_id} complete!")
 
