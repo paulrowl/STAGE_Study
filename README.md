@@ -2,27 +2,53 @@
 
 ## Overview
 
-This pipeline classifies and organizes DICOM data from the STAGE MRI study into standardized folders for analysis. It extracts:
+This is a complete analysis pipeline for comparing STAGE MRI sequences to conventional sequences in a non-inferiority study. The pipeline includes:
+
+1. **DICOM Organization** - Automatically identify and rename sequence folders
+2. **DICOM Classification** - Classify sequences based on metadata
+3. **Visual Verification** - Interactive viewers for quality control
+4. **Quantitative Analysis** - HD-BET brain extraction, ANTs registration, SynthSeg tissue segmentation, and comprehensive metrics
+5. **Statistical Analysis** - Non-inferiority testing and effect sizes
+
+**Data:** 50 stroke patients, each with 6 sequences:
 - **3 Conventional sequences**: T1_conv, T2_conv, SWI_conv
 - **3 STAGE sequences**: T1_STAGE, T2_STAGE, SWI_STAGE
 
-All data is filtered to include only **axial/transverse plane** images. PD_STAGE and phase images are excluded.
+**Platform:** Optimized for macOS (Intel and Apple Silicon)
 
 ## Quick Start
 
-### 1. Classify and organize DICOM files
+### 1. DICOM Folder Organization (reads headers to identify sequences)
+
 ```bash
 cd ~/Projects/STAGE_Study
+
+# Dry run first (safe - shows what will happen)
+python scripts/dicom_folder_renamer.py data/raw --dry-run
+
+# Review the output, then run live
+python scripts/dicom_folder_renamer.py data/raw --live
+```
+
+This will:
+- Read DICOM headers (SeriesDescription field)
+- Identify sequences: T1 MPRAGE, STAGE-T1W, T2 AX, T2w_STAGE, SWI AX, SWI_STAGE
+- Rename folders to: T1_conv, T1_STAGE, T2_conv, T2_STAGE, SWI_conv, SWI_STAGE
+- Validate file counts against expected values
+
+### 2. Alternative: Metadata-based Classification
+
+```bash
 python scripts/dicom_sequence_classifier.py data/raw --live
 ```
 
 This will:
 - Scan all DICOM files in `data/raw/`
-- Classify sequences based on DICOM metadata
+- Classify sequences based on DICOM metadata (PixelBandwidth, FlipAngle, TE, TR)
 - Organize into `data/raw/organized/` with 6 standardized folders per subject
 - Exclude non-axial orientations, PD_STAGE, and phase data
 
-### 2. Visually verify classification
+### 3. Visually verify classification
 
 **Option A: Overview viewer** (all 6 sequences side-by-side)
 ```bash
@@ -36,10 +62,29 @@ python scripts/dicom_slice_viewer.py data/raw/organized
 
 Use arrow keys (←/→) to navigate slices, (↑/↓) to switch sequences.
 
-### 3. Check organized output
+### 4. Check organized output
 ```bash
 ls -lh data/raw/organized/Anon*/
 ```
+
+---
+
+## Complete Analysis Pipeline
+
+For the full quantitative analysis workflow (brain extraction, registration, tissue segmentation, and metrics calculation), see:
+
+📖 **[Complete Implementation Plan](docs/IMPLEMENTATION_PLAN.md)** - Comprehensive guide for the full pipeline
+
+The complete pipeline includes:
+- HD-BET brain extraction
+- ANTs rigid co-registration
+- SynthSeg tissue segmentation (GM/WM/CSF)
+- 60+ quantitative metrics per sequence comparison
+- Statistical analysis and non-inferiority testing
+
+**Expected processing time:** 12-15 hours for 50 patients on Apple Silicon Mac
+
+---
 
 ## Expected Directory Structure
 
@@ -125,6 +170,32 @@ The classifier uses DICOM metadata to identify sequences:
 
 ## Scripts
 
-- **`dicom_sequence_classifier.py`**: Main classification and organization script
-- **`dicom_viewer.py`**: Overview viewer for quick verification
-- **`dicom_slice_viewer.py`**: Detailed interactive slice viewer
+### DICOM Organization
+- **`dicom_folder_renamer.py`**: Reads DICOM headers and renames folders based on SeriesDescription
+- **`dicom_sequence_classifier.py`**: Classifies sequences based on DICOM metadata (PixelBandwidth, FlipAngle, etc.)
+
+### Visualization and QC
+- **`dicom_viewer.py`**: Overview viewer showing all 6 sequences side-by-side
+- **`dicom_slice_viewer.py`**: Detailed interactive slice viewer with keyboard navigation
+
+### Documentation
+- **`docs/IMPLEMENTATION_PLAN.md`**: Complete guide for the full analysis pipeline (HD-BET, ANTs, SynthSeg, metrics)
+
+## Installation
+
+See [Installation Guide](docs/IMPLEMENTATION_PLAN.md#installation-guide) for complete setup instructions.
+
+**Quick setup for Mac:**
+```bash
+# Install Python 3.9 via Miniforge
+curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-MacOSX-arm64.sh"
+bash Miniforge3-MacOSX-arm64.sh
+
+# Create environment
+conda create -n stage_analysis python=3.9 -y
+conda activate stage_analysis
+
+# Install packages
+conda install -c conda-forge numpy pandas scipy matplotlib seaborn -y
+pip install nibabel pydicom scikit-image pylibjpeg pylibjpeg-libjpeg
+```
