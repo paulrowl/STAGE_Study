@@ -115,14 +115,14 @@ class DICOMSequenceClassifier:
         """
         sequence_folders = []
         
-        # Find folders starting with "1000" at first level
-        level1_folders = [f for f in subject_dir.iterdir() 
-                         if f.is_dir() and f.name.startswith('1000')]
-        
+        # Find folders starting with "100" at first level (matches 1000*, 1001*, 1002*, 1003*, etc.)
+        level1_folders = [f for f in subject_dir.iterdir()
+                         if f.is_dir() and f.name.startswith('100')]
+
         for level1 in level1_folders:
-            # Find folders starting with "1000" at second level
-            level2_folders = [f for f in level1.iterdir() 
-                            if f.is_dir() and f.name.startswith('1000')]
+            # Find folders starting with "100" at second level
+            level2_folders = [f for f in level1.iterdir()
+                            if f.is_dir() and f.name.startswith('100')]
             
             for level2 in level2_folders:
                 # Get all folders at third level (sequence folders)
@@ -186,6 +186,8 @@ class DICOMSequenceClassifier:
 
                 properties = {
                     'series_description': safe_str('SeriesDescription'),
+                    'manufacturer': safe_str('Manufacturer'),  # CRITICAL for STAGE vs conventional
+                    'manufacturer_model': safe_str('ManufacturerModelName'),
                     'pixel_bandwidth': safe_float('PixelBandwidth'),
                     'pixel_representation': safe_int('PixelRepresentation'),
                     'rows': safe_int('Rows'),
@@ -291,110 +293,95 @@ class DICOMSequenceClassifier:
 
     def classify_sequence(self, properties):
         """
-        Classify sequence based on DICOM properties
+        Classify sequence based on DICOM properties using manufacturer-based hierarchy
+
+        CRITICAL INSIGHT: Manufacturer field perfectly separates STAGE from conventional:
+        - Siemens/SIEMENS → conventional (_conv)
+        - SpinTechMRI/SpinTech, Inc. → STAGE (_STAGE)
+
         Returns: (sequence_type, confidence_score, matching_criteria)
         """
         if not properties:
             return ('UNKNOWN', 0.0, [])
 
-        best_match = None
-        best_score = 0.0
-        best_criteria = []
+        criteria = []
 
+        # STEP 1: Determine scanner type from Manufacturer (100% reliable)
+        manufacturer = properties.get('manufacturer', 'UNKNOWN').upper()
+
+        if 'SIEMENS' in manufacturer:
+            scanner_type = 'conv'
+            criteria.append(f"Manufacturer: {manufacturer} (conventional)")
+        elif 'SPINTECH' in manufacturer:
+            scanner_type = 'STAGE'
+            criteria.append(f"Manufacturer: {manufacturer} (STAGE)")
+        else:
+            scanner_type = 'UNKNOWN'
+            criteria.append(f"Manufacturer: {manufacturer} (unknown scanner)")
+
+        # STEP 2: Determine sequence type from SeriesDescription
         series_desc = properties['series_description'].upper()
-        pixel_bw = properties['pixel_bandwidth']
-        pixel_rep = properties['pixel_representation']
-        num_slices = properties['num_files']
-        
-        for seq_type, signature in self.sequence_signatures.items():
-            score = 0.0
-            criteria = []
-            
-            # Check SeriesDescription (highest weight: 50 points)
-            desc_match = False
-            for pattern in signature['series_desc_patterns']:
-                if pattern.upper() in series_desc:
-                    score += 50.0
-                    criteria.append(f"SeriesDesc matches '{pattern}'")
-                    desc_match = True
-                    break
-            
-            if not desc_match:
-                # Partial match (20 points)
-                for pattern in signature['series_desc_patterns']:
-                    words = pattern.upper().split()
-                    if any(word in series_desc for word in words if len(word) > 3):
-                        score += 20.0
-                        criteria.append(f"SeriesDesc partial match")
-                        break
-            
-            # Check PixelBandwidth (20 points)
-            bw_min, bw_max = signature['pixel_bandwidth_range']
-            if pixel_bw > 0 and bw_min <= pixel_bw <= bw_max:
-                score += 20.0
-                criteria.append(f"PixelBandwidth in range ({pixel_bw:.1f})")
-            elif pixel_bw > 0 and bw_min * 0.8 <= pixel_bw <= bw_max * 1.2:
-                score += 10.0
-                criteria.append(f"PixelBandwidth close ({pixel_bw:.1f})")
-            
-            # Check PixelRepresentation (10 points)
-            expected_pixel_rep = signature['pixel_representation']
-            if isinstance(expected_pixel_rep, list):
-                if pixel_rep in expected_pixel_rep:
-                    score += 10.0
-                    criteria.append(f"PixelRep matches ({pixel_rep})")
+        num_files = properties['num_files']
+
+        sequence_type = None
+        confidence = 0.0
+
+        # T1 detection
+        if 'T1' in series_desc or 'MPRAGE' in series_desc:
+            if 'STAGE' in series_desc or scanner_type == 'STAGE':
+                sequence_type = 'T1'
+                confidence = 100.0
+                criteria.append(f"T1 sequence detected in: {properties['series_description']}")
             else:
-                if pixel_rep == expected_pixel_rep:
-                    score += 10.0
-                    criteria.append(f"PixelRep matches ({pixel_rep})")
-            
-            # Check slice count (20 points)
-            slice_min, slice_max = signature['expected_slices']
-            if slice_min <= num_slices <= slice_max:
-                score += 20.0
-                criteria.append(f"Slice count in range ({num_slices})")
-            elif slice_min * 0.8 <= num_slices <= slice_max * 1.2:
-                score += 10.0
-                criteria.append(f"Slice count close ({num_slices})")
+                sequence_type = 'T1'
+                confidence = 100.0
+                criteria.append(f"T1 sequence detected in: {properties['series_description']}")
 
-            # Check SequenceName if specified (15 points)
-            if 'sequence_name' in signature:
-                expected_seq_name = signature['sequence_name']
-                actual_seq_name = properties.get('sequence_name', '')
-                if expected_seq_name.lower() in actual_seq_name.lower():
-                    score += 15.0
-                    criteria.append(f"SequenceName matches ({actual_seq_name})")
+        # T2 detection
+        elif 'T2' in series_desc and 'SWI' not in series_desc:
+            if 'STAGE' in series_desc or scanner_type == 'STAGE':
+                sequence_type = 'T2'
+                confidence = 100.0
+                criteria.append(f"T2 sequence detected in: {properties['series_description']}")
+            else:
+                sequence_type = 'T2'
+                confidence = 100.0
+                criteria.append(f"T2 sequence detected in: {properties['series_description']}")
 
-            # Check EchoTime range if specified (10 points)
-            if 'echo_time_range' in signature:
-                te_min, te_max = signature['echo_time_range']
-                actual_te = properties.get('echo_time', 0)
-                if actual_te > 0 and te_min <= actual_te <= te_max:
-                    score += 10.0
-                    criteria.append(f"TE in range ({actual_te:.1f} ms)")
+        # SWI detection
+        elif 'SWI' in series_desc:
+            # Exclude phase, magnitude, and MIP variants - keep only primary SWI
+            if '_Pha' in series_desc or '_Mag' in series_desc or 'MIP' in series_desc or 'mIP' in series_desc:
+                # These are variants, exclude them
+                suffix = self.get_sequence_suffix(properties)
+                return ('SWI' + '_' + scanner_type + suffix, 50.0, criteria + [f"SWI variant excluded: {properties['series_description']}"])
 
-            # Check FlipAngle range if specified (10 points)
-            if 'flip_angle_range' in signature:
-                fa_min, fa_max = signature['flip_angle_range']
-                actual_fa = properties.get('flip_angle', 0)
-                if actual_fa > 0 and fa_min <= actual_fa <= fa_max:
-                    score += 10.0
-                    criteria.append(f"FA in range ({actual_fa:.1f}°)")
+            sequence_type = 'SWI'
+            confidence = 100.0
+            criteria.append(f"SWI sequence detected in: {properties['series_description']}")
 
-            if score > best_score:
-                best_score = score
-                best_match = seq_type
-                best_criteria = criteria.copy()
-        
-        # Require minimum score
-        if best_score < 40.0:
-            # Still generate suffix even for unknown sequences
+        # PD detection (to exclude)
+        elif 'PD' in series_desc and 'STAGE' in series_desc:
+            sequence_type = 'PD'
+            confidence = 100.0
+            criteria.append(f"PD sequence detected (excluded): {properties['series_description']}")
+
+        else:
+            # Unknown sequence type
             suffix = self.get_sequence_suffix(properties)
-            return ('UNKNOWN' + suffix, best_score, best_criteria)
+            return ('UNKNOWN' + suffix, 0.0, criteria + [f"Could not classify: {properties['series_description']}"])
 
-        # Add suffix to differentiate multi-echo and other variants
-        suffix = self.get_sequence_suffix(properties)
-        return (best_match + suffix, best_score, best_criteria)
+        # STEP 3: Combine sequence type + scanner type
+        if sequence_type and scanner_type != 'UNKNOWN':
+            final_classification = f"{sequence_type}_{scanner_type}"
+
+            # Add suffix for variants
+            suffix = self.get_sequence_suffix(properties)
+
+            return (final_classification + suffix, confidence, criteria)
+        else:
+            suffix = self.get_sequence_suffix(properties)
+            return ('UNKNOWN' + suffix, 0.0, criteria)
     
     def should_include_sequence(self, full_classification, num_files, properties=None):
         """
@@ -524,6 +511,8 @@ class DICOMSequenceClassifier:
                 'full_classification': full_type,
                 'confidence': confidence,
                 'series_description': properties['series_description'],
+                'manufacturer': properties['manufacturer'],
+                'manufacturer_model': properties['manufacturer_model'],
                 'pixel_bandwidth': properties['pixel_bandwidth'],
                 'pixel_representation': properties['pixel_representation'],
                 'num_files': properties['num_files'],
