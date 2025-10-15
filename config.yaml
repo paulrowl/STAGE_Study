@@ -1,4 +1,4 @@
-base_dir: ~/Projects/STAGE_Study/data/organized
+base_dir: ~/Projects/STAGE_Study/data/raw/organized
 output_dir: ~/Projects/STAGE_Study/output
 device: cpu
 num_parallel: 2
