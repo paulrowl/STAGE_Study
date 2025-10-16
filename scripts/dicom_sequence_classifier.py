@@ -295,9 +295,9 @@ class DICOMSequenceClassifier:
         """
         Classify sequence based on DICOM properties using manufacturer-based hierarchy
 
-        CRITICAL INSIGHT: Manufacturer field perfectly separates STAGE from conventional:
-        - Siemens/SIEMENS → conventional (_conv)
-        - SpinTechMRI/SpinTech, Inc. → STAGE (_STAGE)
+        CRITICAL INSIGHT: SeriesDescription determines STAGE vs conventional:
+        - SeriesDescription contains "STAGE" → STAGE sequence
+        - Otherwise, use Manufacturer field
 
         Returns: (sequence_type, confidence_score, matching_criteria)
         """
@@ -306,21 +306,26 @@ class DICOMSequenceClassifier:
 
         criteria = []
 
-        # STEP 1: Determine scanner type from Manufacturer (100% reliable)
+        # STEP 1: Determine scanner type - PRIORITIZE SeriesDescription over Manufacturer
+        series_desc = properties['series_description'].upper()
         manufacturer = properties.get('manufacturer', 'UNKNOWN').upper()
 
-        if 'SIEMENS' in manufacturer:
-            scanner_type = 'conv'
-            criteria.append(f"Manufacturer: {manufacturer} (conventional)")
+        # First check SeriesDescription for "STAGE" keyword (most reliable)
+        if 'STAGE' in series_desc:
+            scanner_type = 'STAGE'
+            criteria.append(f"STAGE keyword in SeriesDescription: {properties['series_description']}")
+        # Fall back to Manufacturer
         elif 'SPINTECH' in manufacturer:
             scanner_type = 'STAGE'
             criteria.append(f"Manufacturer: {manufacturer} (STAGE)")
+        elif 'SIEMENS' in manufacturer:
+            scanner_type = 'conv'
+            criteria.append(f"Manufacturer: {manufacturer} (conventional)")
         else:
             scanner_type = 'UNKNOWN'
             criteria.append(f"Manufacturer: {manufacturer} (unknown scanner)")
 
         # STEP 2: Determine sequence type from SeriesDescription
-        series_desc = properties['series_description'].upper()
         num_files = properties['num_files']
 
         sequence_type = None
@@ -328,14 +333,9 @@ class DICOMSequenceClassifier:
 
         # T1 detection
         if 'T1' in series_desc or 'MPRAGE' in series_desc:
-            if 'STAGE' in series_desc or scanner_type == 'STAGE':
-                sequence_type = 'T1'
-                confidence = 100.0
-                criteria.append(f"T1 sequence detected in: {properties['series_description']}")
-            else:
-                sequence_type = 'T1'
-                confidence = 100.0
-                criteria.append(f"T1 sequence detected in: {properties['series_description']}")
+            sequence_type = 'T1'
+            confidence = 100.0
+            criteria.append(f"T1 sequence detected in: {properties['series_description']}")
 
         # T2 detection
         elif 'T2' in series_desc and 'SWI' not in series_desc:
@@ -388,9 +388,13 @@ class DICOMSequenceClassifier:
         Determine if a sequence should be included based on filtering criteria
         Returns: (should_include, reason)
         """
-        # Check minimum image count
-        if num_files < self.min_images:
-            return False, f"Too few images ({num_files} < {self.min_images})"
+        # Check minimum image count - more lenient for T1_STAGE (≥100 files acceptable)
+        min_required = self.min_images
+        if full_classification.startswith('T1_STAGE'):
+            min_required = max(100, self.min_images)  # Accept ≥100 for T1_STAGE
+
+        if num_files < min_required:
+            return False, f"Too few images ({num_files} < {min_required})"
 
         # Check if axial orientation (only include axial/transverse)
         if properties and not properties.get('is_axial', True):
@@ -404,11 +408,14 @@ class DICOMSequenceClassifier:
         if '_phase' in full_classification:
             return False, f"Phase image excluded (phase data not needed)"
 
-        # Exclude multi-echo variants for T1_STAGE (keep only echo1_mag)
+        # For T1_STAGE: Keep primary acquisitions and good derived sequences
+        # Exclude only echo variants if exclude_t1_stage_variants is True
         if self.exclude_t1_stage_variants:
             if full_classification.startswith('T1_STAGE'):
-                if full_classification not in ['T1_STAGE', 'T1_STAGE_echo1_mag']:
-                    return False, f"T1_STAGE variant excluded (keeping only echo1_mag)"
+                # Keep base T1_STAGE and acceptable variants
+                if full_classification not in ['T1_STAGE', 'T1_STAGE_echo1_mag', 'T1_STAGE_mag']:
+                    if '_echo' in full_classification and num_files < 300:
+                        return False, f"T1_STAGE echo variant with low file count excluded"
 
         return True, "Included"
 
