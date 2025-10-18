@@ -306,6 +306,8 @@ def main():
     metrics_dir = Path('output/metrics')
     scores_file = Path('output/statistics/neurorad_scores_unified.csv')
     output_dir = Path('output/statistics')
+    figures_dir = Path('output/figures')
+    figures_dir.mkdir(parents=True, exist_ok=True)
 
     print("="*80)
     print("COMPREHENSIVE SEQUENCE ANALYSIS: T1, T2, and SWI")
@@ -373,7 +375,7 @@ def main():
     # Create visualizations
     if all_scored_data:
         print("\nCreating visualizations...")
-        create_comparison_plots(all_scored_data, output_dir)
+        create_comparison_plots(all_scored_data, figures_dir)
 
     print("\n" + "="*80)
     print("ANALYSIS COMPLETE")

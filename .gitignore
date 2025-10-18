@@ -1,11 +1,20 @@
 # Data files
 data/
 output/
-docs/
 *.dcm
 *.dicom
 *.nii.gz
 *.nii
+
+# Documentation - Abstracts and Results (exclude from git)
+docs/ISMRM/
+docs/ASNR/
+docs/STAGE_Study_Manuscript.md
+docs/summaries/RESULTS_SUMMARY.md
+docs/summaries/NEURORAD_SCORES_ANALYSIS.md
+docs/neuro-rad-score-anon.numbers
+docs/validated_subjects_list.txt
+docs/CLEANUP_REPORT.txt
 
 # Python
 __pycache__/

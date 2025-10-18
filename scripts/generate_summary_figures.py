@@ -362,7 +362,7 @@ def main():
     print("GENERATING 5 COMPREHENSIVE SUMMARY FIGURES")
     print("="*80)
 
-    output_dir = Path('output/statistics')
+    output_dir = Path('output/figures')
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load all metrics
