@@ -1,6 +1,7 @@
 # Data files
 data/
 output/
+docs/
 *.dcm
 *.dicom
 *.nii.gz
@@ -30,6 +31,7 @@ build/
 Thumbs.db
 
 # Logs
+logs/
 *.log
 *.csv
 
